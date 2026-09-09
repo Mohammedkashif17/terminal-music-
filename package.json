@@ -1,0 +1,24 @@
+{
+  "name": "terminal-music-player",
+  "version": "1.0.0",
+  "description": "A lightweight terminal music player for macOS using afplay",
+  "main": "player.js",
+  "scripts": {
+    "start": "node player.js",
+    "test": "node test.js"
+  },
+  "keywords": [
+    "terminal",
+    "cli",
+    "music-player",
+    "audio",
+    "afplay",
+    "macos"
+  ],
+  "author": "Mohammed Kashif",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mohammedkashif17/terminal-music-.git"
+  }
+}

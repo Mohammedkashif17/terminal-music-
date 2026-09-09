@@ -1,5 +1,5 @@
-const { spawn } = reqiure("node:child_process");
-const childProcess = spwn('ls');
-childProcess.stdout.on('data', (data)=> {
-    console.log(data.toString())
-})
+const { spawn } = require("node:child_process");
+const childProcess = spawn('ls');
+childProcess.stdout.on('data', (data) => {
+    console.log(data.toString());
+});

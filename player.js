@@ -1,10 +1,15 @@
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, exec } = require('child_process');
 
 // Read all MP3 files
-const path = './songs';
+const songsDir = './songs';
 
-const songs = fs.readdirSync(path)
+if (!fs.existsSync(songsDir)) {
+    console.log(`Songs directory "${songsDir}" not found.`);
+    process.exit(1);
+}
+
+const songs = fs.readdirSync(songsDir)
     .filter(file => file.endsWith('.mp3'));
 
 if (songs.length === 0) {
@@ -15,8 +20,19 @@ if (songs.length === 0) {
 // ---------------- STATE ----------------
 
 let selected = 0;
+let currentPlaying = -1;
 let childProcess = null;
 let isPaused = false;
+let isManuallyStopped = false;
+
+// Volume: 0 to 100
+let volume = 80;
+let previousVolume = 80;
+let isMuted = false;
+
+// Repeat mode: 'off' | 'one' | 'all'
+const REPEAT_MODES = ['off', 'one', 'all'];
+let repeatModeIndex = 0;
 
 // ---------------- START ----------------
 
@@ -28,159 +44,268 @@ process.stdin.resume();
 
 process.stdin.on('data', (input) => {
 
-    // Quit
-    if (input === 'q') {
+    // Quit (q, Q, or Ctrl+C)
+    if (input === 'q' || input === 'Q' || input === '\u0003') {
         cleanup();
         process.exit(0);
     }
 
-    // Up Arrow
-    if (input[2] === 'A') {
+    // Up Arrow or 'k'
+    if (input === '\u001b[A' || input[2] === 'A' || input === 'k') {
         selected--;
-
         if (selected < 0) {
             selected = songs.length - 1;
         }
-
         render();
     }
 
-    // Down Arrow
-    if (input[2] === 'B') {
+    // Down Arrow or 'j'
+    if (input === '\u001b[B' || input[2] === 'B' || input === 'j') {
         selected++;
-
         if (selected >= songs.length) {
             selected = 0;
         }
-
         render();
     }
 
-    // Enter → Play
-    if (input === '\r') {
+    // Enter → Play selected song
+    if (input === '\r' || input === '\n') {
         player(selected);
     }
 
-    // P → Pause / Resume
-    if (input === 'p') {
+    // P or Space → Pause / Resume
+    if (input === 'p' || input === 'P' || input === ' ') {
         togglePause();
+    }
+
+    // S → Stop
+    if (input === 's' || input === 'S') {
+        stopPlayback();
+    }
+
+    // R or L → Toggle Repeat mode
+    if (input === 'r' || input === 'R' || input === 'l' || input === 'L') {
+        toggleRepeat();
+    }
+
+    // + or = or ] → Volume Up
+    if (input === '+' || input === '=' || input === ']') {
+        changeVolume(10);
+    }
+
+    // - or _ or [ → Volume Down
+    if (input === '-' || input === '_' || input === '[') {
+        changeVolume(-10);
+    }
+
+    // M → Mute / Unmute
+    if (input === 'm' || input === 'M') {
+        toggleMute();
     }
 });
 
 // ---------------- PLAYER ----------------
 
 function player(index) {
-
-    // Stop previous song
+    // Mark previous as manual stop so it doesn't trigger auto-repeat
+    isManuallyStopped = true;
     if (childProcess) {
         childProcess.kill('SIGTERM');
         childProcess = null;
     }
 
-    const song = songs[index];
+    currentPlaying = index;
+    isPaused = false;
+    isManuallyStopped = false;
 
     render();
 
+    const song = songs[index];
+    const volRatio = (volume / 100).toFixed(2);
+
     childProcess = spawn('afplay', [
-        `${path}/${song}`
+        '-v', volRatio,
+        `${songsDir}/${song}`
     ]);
 
-    isPaused = false;
-
-    childProcess.on('close', () => {
+    childProcess.on('close', (code) => {
+        const wasManual = isManuallyStopped;
         childProcess = null;
         isPaused = false;
+
+        if (!wasManual && code === 0) {
+            const mode = REPEAT_MODES[repeatModeIndex];
+            if (mode === 'one') {
+                player(currentPlaying);
+                return;
+            } else if (mode === 'all') {
+                const nextIndex = (currentPlaying + 1) % songs.length;
+                player(nextIndex);
+                return;
+            }
+        }
+
+        if (!wasManual) {
+            currentPlaying = -1;
+        }
 
         render();
     });
 }
 
-// ---------------- PAUSE / RESUME ----------------
+// ---------------- CONTROLS ----------------
+
+function stopPlayback() {
+    isManuallyStopped = true;
+    if (childProcess) {
+        childProcess.kill('SIGTERM');
+        childProcess = null;
+    }
+    currentPlaying = -1;
+    isPaused = false;
+    render();
+}
 
 function togglePause() {
-
-    // No song playing
     if (!childProcess) {
         return;
     }
 
     if (!isPaused) {
-
-        // Pause
         childProcess.kill('SIGSTOP');
-
         isPaused = true;
-
     } else {
-
-        // Resume
         childProcess.kill('SIGCONT');
-
         isPaused = false;
     }
 
     render();
 }
 
+function toggleRepeat() {
+    repeatModeIndex = (repeatModeIndex + 1) % REPEAT_MODES.length;
+    render();
+}
+
+function changeVolume(delta) {
+    if (isMuted) {
+        isMuted = false;
+        volume = previousVolume > 0 ? previousVolume : 50;
+    }
+    volume = Math.min(100, Math.max(0, volume + delta));
+    syncSystemVolume(volume);
+    render();
+}
+
+function toggleMute() {
+    if (isMuted) {
+        isMuted = false;
+        volume = previousVolume > 0 ? previousVolume : 50;
+        syncSystemVolume(volume);
+    } else {
+        isMuted = true;
+        previousVolume = volume;
+        volume = 0;
+        syncSystemVolume(0);
+    }
+    render();
+}
+
+function syncSystemVolume(vol) {
+    exec(`osascript -e "set volume output volume ${vol}"`, () => {});
+}
+
+// ---------------- UI HELPERS ----------------
+
+function getVolumeBar(vol) {
+    const totalBars = 10;
+    const filledBars = Math.round((vol / 100) * totalBars);
+    const emptyBars = totalBars - filledBars;
+    return '[' + '='.repeat(filledBars) + ' '.repeat(emptyBars) + ']';
+}
+
+function getRepeatLabel(mode) {
+    switch (mode) {
+        case 'one':
+            return '🔂 Repeat One';
+        case 'all':
+            return '🔁 Repeat All';
+        case 'off':
+        default:
+            return '➡️  Off';
+    }
+}
+
 // ---------------- UI ----------------
 
 function render() {
-
     // Clear terminal
     process.stdout.write('\x1b[2J');
     process.stdout.write('\x1b[H');
 
-    console.log('🎵 MUSIC PLAYER');
-    console.log('────────────────────────\n');
+    console.log('🎵 TERMINAL MUSIC PLAYER');
+    console.log('────────────────────────────────────────\n');
 
     songs.forEach((song, index) => {
+        const isSelected = index === selected;
+        const isCurrent = index === currentPlaying && childProcess;
 
-        if (index === selected) {
-            console.log(`> ${song}`);
-        } else {
-            console.log(`  ${song}`);
+        const cursor = isSelected ? '> ' : '  ';
+        let statusTag = '';
+
+        if (isCurrent) {
+            statusTag = isPaused ? ' [⏸️ PAUSED]' : ' [▶️ PLAYING]';
         }
 
+        console.log(`${cursor}${song}${statusTag}`);
     });
 
-    console.log('\n────────────────────────');
+    console.log('\n────────────────────────────────────────');
 
-    if (childProcess) {
-
-        console.log(`▶️  ${songs[selected]}`);
-
-        if (isPaused) {
-            console.log('⏸️  PAUSED');
-        } else {
-            console.log('▶️  PLAYING');
-        }
-
+    // Status Section
+    if (childProcess && currentPlaying >= 0) {
+        const playingSong = songs[currentPlaying];
+        const statusText = isPaused ? '⏸️  PAUSED' : '▶️  PLAYING';
+        console.log(`Now Playing: ${playingSong}`);
+        console.log(`Status:      ${statusText}`);
     } else {
-
-        console.log('⏹️  No song playing');
-
+        console.log('Status:      ⏹️  Stopped');
     }
 
-    console.log('\n↑ ↓ Navigate');
-    console.log('Enter  Play');
-    console.log('p      Pause / Resume');
-    console.log('q      Quit');
+    const mode = REPEAT_MODES[repeatModeIndex];
+    const volDisplay = isMuted ? 'MUTED' : `${volume}%`;
+    console.log(`Volume:      ${isMuted ? '🔇' : '🔊'} ${getVolumeBar(volume)} ${volDisplay}`);
+    console.log(`Repeat:      ${getRepeatLabel(mode)}`);
+
+    console.log('\n────────────────────────────────────────');
+    console.log('Controls:');
+    console.log('  ↑ / k, ↓ / j  Navigate      |  Enter  Play selected');
+    console.log('  p / Space     Pause / Resume|  s      Stop playback');
+    console.log('  + / -         Volume Up / Dn|  m      Toggle mute');
+    console.log('  r             Repeat mode   |  q      Quit');
 }
 
 // ---------------- CLEANUP ----------------
 
 function cleanup() {
-
+    isManuallyStopped = true;
     if (childProcess) {
         childProcess.kill('SIGTERM');
         childProcess = null;
     }
 
-    process.stdin.setRawMode(false);
+    try {
+        process.stdin.setRawMode(false);
+    } catch (e) {}
     process.stdin.pause();
 
     process.stdout.write('\x1b[2J');
     process.stdout.write('\x1b[H');
 
-    console.log('Goodbye 🎵');
+    console.log('Goodbye 🎵\n');
 }
+
+process.on('SIGINT', () => {
+    cleanup();
+    process.exit(0);
+});
